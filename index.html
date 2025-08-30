@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<title>WEBトランシーバー（ボタン切替）</title>
+<style>
+body { font-family: 'Arial',sans-serif; background:#111; color:#fff; text-align:center; margin:0; padding:0;}
+h1 { color:#0f0; margin-top:20px; font-size:2em; text-shadow:0 0 5px #0f0;}
+#transceiver { display:flex; justify-content:center; align-items:flex-start; margin-top:50px; flex-wrap:wrap; }
+#controls { display:flex; flex-direction:column; align-items:center; }
+#led-send, #led-recv { width:20px; height:20px; border-radius:50%; background:#555; box-shadow:0 0 10px #000; margin-bottom:10px;}
+#ptt { width:90px; height:90px; border-radius:50%; background:#c00; border:4px solid #800; font-size:1.2em; font-weight:bold; color:#fff; cursor:pointer; box-shadow: inset 0 5px #900,0 5px 10px #000; margin-bottom:20px; transition: all 0.1s ease;}
+#ptt:active { box-shadow: inset 0 2px #900,0 2px 5px #000; transform: translateY(3px);}
+#channels-select { display:flex; justify-content:center; flex-wrap:wrap; margin-bottom:20px; }
+.channel-btn { margin:3px; padding:8px 12px; font-size:1em; background:#444; color:#0f0; border:none; border-radius:5px; cursor:pointer; box-shadow:0 2px #000;}
+.channel-btn.active { background:#0f0; color:#000; box-shadow: inset 0 2px #000; }
+#status { margin-top:15px;}
+#users-count { margin-bottom:5px; font-size:1em; color:#0ff; }
+#broadcast-signal { padding:6px 12px; font-size:1em; border:none; border-radius:5px; background:#0f0; color:#000; cursor:pointer; }
+
+/* スマホ対応 */
+@media (max-width:600px){
+  #ptt { width:70px; height:70px; }
+  #led-send, #led-recv { width:15px; height:15px; }
+  .channel-btn { padding:6px 10px; font-size:0.9em; margin:2px; }
+}
+</style>
+</head>
+<body>
+<h1>WEBトランシーバー</h1>
+<div id="transceiver">
+  <div id="controls">
+    <div id="led-send"></div>
+    <div id="led-recv"></div>
+    <button id="ptt">PTT</button>
+    <div id="channels-select"></div>
+    <div id="status">
+      <div id="users-count">接続人数: 0</div>
+      <button id="broadcast-signal">全体呼び出し</button>
+    </div>
+  </div>
+</div>
+
+<audio id="signal-sound" src="transceiver.mp3"></audio>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/9.24.0/firebase-app.js";
+import { getDatabase, ref, set, onChildAdded, onValue, push, remove } from "https://www.gstatic.com/firebasejs/9.24.0/firebase-database.js";
+
+// Firebase設定
+const firebaseConfig = {
+  apiKey:"AIzaSyB4jCrc_tLCBIVj7oKVk_3q6n96Jk619V4",
+  authDomain:"transceiver-3ea9d.firebaseapp.com",
+  databaseURL:"https://transceiver-3ea9d-default-rtdb.firebaseio.com",
+  projectId:"transceiver-3ea9d",
+  storageBucket:"transceiver-3ea9d.firebasestorage.app",
+  messagingSenderId:"622521936157",
+  appId:"1:622521936157:web:36ed05304ddcd71d7fd9f4",
+  measurementId:"G-NNJGVC9Q7N"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+
+let localStream;
+let pcs = {};
+let currentChannel = 1;
+const ledSend = document.getElementById('led-send');
+const ledRecv = document.getElementById('led-recv');
+const usersCountLabel = document.getElementById('users-count');
+const signalBtn = document.getElementById('broadcast-signal');
+const signalSound = document.getElementById('signal-sound');
+
+// チャンネルボタン
+const channelsSelect = document.getElementById('channels-select');
+for(let i=1;i<=10;i++){
+  const btn = document.createElement('button');
+  btn.textContent = i;
+  btn.className='channel-btn';
+  if(i===1) btn.classList.add('active');
+  btn.onclick=()=>selectChannel(i);
+  channelsSelect.appendChild(btn);
+}
+
+let myId = Date.now().toString();
+
+function selectChannel(ch){
+  currentChannel = ch;
+  document.querySelectorAll('.channel-btn').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('.channel-btn')[ch-1].classList.add('active');
+  joinChannel();
+  updateUsersCount();
+}
+
+// ユーザー登録
+function joinChannel(){
+  const userRef = ref(db, `channel${currentChannel}/users/${myId}`);
+  set(userRef,{ joined:true });
+  window.addEventListener('beforeunload', ()=>remove(userRef));
+}
+
+// 接続人数更新
+function updateUsersCount(){
+  const usersRef = ref(db, `channel${currentChannel}/users`);
+  onValue(usersRef, snap=>{
+    const users = snap.val();
+    const count = users ? Object.keys(users).length : 0;
+    usersCountLabel.textContent = `接続人数: ${count}`;
+  });
+}
+
+// PTT
+const pttBtn=document.getElementById('ptt');
+pttBtn.onmousedown=startPTT;
+pttBtn.onmouseup=stopPTT;
+pttBtn.ontouchstart=startPTT;
+pttBtn.ontouchend=stopPTT;
+
+async function startPTT(){
+  if(!localStream){
+    localStream = await navigator.mediaDevices.getUserMedia({ audio:true });
+  }
+  ledSend.style.background='#f00';
+  if(!pcs[currentChannel]){
+    pcs[currentChannel]=new RTCPeerConnection();
+    localStream.getTracks().forEach(track=>pcs[currentChannel].addTrack(track,localStream));
+    pcs[currentChannel].ontrack=(event)=>{
+      const audio=document.createElement('audio');
+      audio.srcObject=event.streams[0];
+      audio.autoplay=true;
+      document.body.appendChild(audio);
+      ledRecv.style.background='#0f0';
+    };
+    pcs[currentChannel].onicecandidate=(event)=>{
+      if(event.candidate) push(ref(db, `channel${currentChannel}/candidates`), event.candidate.toJSON());
+    };
+    const offer=await pcs[currentChannel].createOffer();
+    await pcs[currentChannel].setLocalDescription(offer);
+    set(ref(db, `channel${currentChannel}/offer`), offer);
+  }
+}
+function stopPTT(){ ledSend.style.background='#555'; }
+
+// Firebase受信
+onChildAdded(ref(db, `channel${currentChannel}/answer`), async snap=>{
+  if(pcs[currentChannel]) await pcs[currentChannel].setRemoteDescription(snap.val());
+});
+onChildAdded(ref(db, `channel${currentChannel}/candidates`), snap=>{
+  if(pcs[currentChannel]) pcs[currentChannel].addIceCandidate(snap.val());
+});
+
+// 全体呼び出し音
+signalBtn.onclick=()=>signalSound.play();
+
+// 初期設定
+selectChannel(1);
+</script>
+</body>
+</html>
